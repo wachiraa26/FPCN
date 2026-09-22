@@ -29,7 +29,13 @@ FPCN/
 Install the core Python dependencies in your environment:
 
 ```bash
-pip install torch numpy h5py scikit-learn multimolecule
+python -m pip install --upgrade pip setuptools wheel
+
+python -m pip install numpy==1.26.4 pandas==2.2.2 scipy==1.13.1 scikit-learn==1.4.2 h5py==3.11.0 biopython==1.84 tqdm==4.66.4
+python -m pip install matplotlib==3.10.0 seaborn==0.13.2 ete3==3.1.3
+python -m pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+python -m pip install regex==2026.9.10 transformers==5.4.0 multimolecule==0.2.1 accelerate einops sentencepiece
+python -m pip install torch-geometric openpyxl
 ```
 
 ## Data preparation 
