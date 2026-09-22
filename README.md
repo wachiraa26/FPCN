@@ -4,11 +4,9 @@ FPCN is a multiscale framework for viral family classification.
 
 ## FPCN architecture
 
-<p align="center">
-  <img src="src/figures/flow_chart.png"
-       alt="Fragment Path Complex Network architecture"
-       width="100%">
-</p>
+## FPCN architecture
+
+![Fragment Path Complex Network architecture](src/figures/fpcn_architecture.png)
 
 
 ## Repository structure
