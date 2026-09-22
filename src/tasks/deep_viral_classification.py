@@ -7,7 +7,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
-from sklearn.metrics import (accuracy_score, balanced_accuracy_score, classification_report, f1_score, pairwise_distances, precision_score, recall_score, )
+from sklearn.metrics import (accuracy_score, balanced_accuracy_score, classification_report, f1_score, precision_score, recall_score, )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from torch import nn
@@ -255,17 +255,6 @@ def collect_embeddings(model, loader, device):
     return (np.asarray(ids, dtype=object), np.concatenate(labels), np.vstack(embeddings).astype(np.float32), )
 
 
-def validation_1nn_accuracy(model, train_loader, val_loader, device, metric, n_jobs):
-    """Classify validation genomes using training genomes as neighbors."""
-    train_ids, train_y, train_z = collect_embeddings(model, train_loader, device)
-    val_ids, val_y, val_z = collect_embeddings(model, val_loader, device)
-    if set(map(str, train_ids)).intersection(map(str, val_ids)):
-        raise ValueError("Training and validation IDs overlap during 1-NN checkpointing.")
-    distances = pairwise_distances(val_z, train_z, metric=metric, n_jobs=n_jobs)
-    predictions = train_y[np.argmin(distances, axis=1)]
-    return float(accuracy_score(val_y, predictions))
-
-
 def sha256_file(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -285,16 +274,10 @@ def export_embeddings(model, dataset, split_name, loader, label_encoder, output_
 
 def train_deep_viral_classification(args):
     args.model_mode = "path_only"
-    if args.min_class_count is None:
-        args.min_class_count = 3 if args.protocol == "1nn" else 15
     if args.early_stopping_patience < 0:
         raise ValueError("early_stopping_patience must be non-negative.")
     if args.early_stopping_min_delta < 0:
         raise ValueError("early_stopping_min_delta must be non-negative.")
-    if args.checkpoint_eval_interval < 1:
-        raise ValueError("checkpoint_eval_interval must be at least 1.")
-    if args.checkpoint_distance_jobs == 0:
-        raise ValueError("checkpoint_distance_jobs cannot be 0.")
     if args.gradient_clip_norm < 0:
         raise ValueError("gradient_clip_norm must be non-negative.")
     set_seed(args.model_seed)
@@ -307,12 +290,9 @@ def train_deep_viral_classification(args):
         raise ValueError("Training and test IDs overlap.")
     if split_sets["validation"] & split_sets["test"]:
         raise ValueError("Validation and test IDs overlap.")
-    checkpoint_train_loader = None
-    if args.checkpoint_metric == "val_1nn_accuracy":
-        checkpoint_train_loader = make_data_loader(train, args, shuffle=False, seed_offset=4, persistent=False, )
     print(f"Data loading: workers={args.num_workers} " f"persistent={args.persistent_workers and args.num_workers > 0} " f"pin_memory={args.pin_memory}")
     print(f"Split/model seeds: split={args.split_seed} model={args.model_seed}")
-    print(f"Checkpoint selection: metric={args.checkpoint_metric} " f"interval={args.checkpoint_eval_interval} " f"distance={args.checkpoint_knn_metric}")
+    print("Checkpoint selection: validation macro-F1")
     print(f"Optimizer: {args.optimizer} " f"lr={args.lr:g} weight_decay={args.weight_decay:g}")
     print(f"PCNN direction: {args.pcnn_direction}")
     print(f"Split sizes: " f"train={len(train)} " f"val={len(val)} " f"test={len(test)}")
@@ -366,32 +346,24 @@ def train_deep_viral_classification(args):
         macro = f1_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )
         recall = recall_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )
         precision = precision_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )
-        checkpoint_due = (args.checkpoint_metric == "val_macro_f1" or epoch == 1 or epoch % args.checkpoint_eval_interval == 0 or epoch == args.epochs)
-        val_1nn = None
-        if args.checkpoint_metric == "val_1nn_accuracy" and checkpoint_due:
-            val_1nn = validation_1nn_accuracy(model, checkpoint_train_loader, val_loader, device, args.checkpoint_knn_metric, args.checkpoint_distance_jobs, )
         row = {"epoch": epoch, "train_loss": (total_loss / max(total, 1)), "val_accuracy": float(acc), "val_balanced_accuracy": float(ba), "val_macro_f1": float(
-            macro), "val_macro_recall": float(recall), "val_macro_precision": float(precision), "val_1nn_accuracy": val_1nn, "lr": float(optimizer.param_groups[0]["lr"]), }
+            macro), "val_macro_recall": float(recall), "val_macro_precision": float(precision), "lr": float(optimizer.param_groups[0]["lr"]), }
         history.append(row)
         log_line = (
             f"Epoch {epoch}/{args.epochs} " f"loss={row['train_loss']:.4f} " f"val_acc={acc:.4f} " f"val_ba={ba:.4f} " f"val_macro_f1={macro:.4f} " f"val_recall={recall:.4f} " f"val_precision={precision:.4f}")
-        if val_1nn is not None:
-            log_line += f" val_1nn_acc={val_1nn:.4f}"
         print(log_line)
-        if checkpoint_due:
-            checkpoint_score = (float(macro) if args.checkpoint_metric == "val_macro_f1" else float(val_1nn))
-            if best_state is None or checkpoint_score > best_score + args.early_stopping_min_delta:
-                best_score = checkpoint_score
-                best_epoch = epoch
-                checks_without_improvement = 0
-                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-            else:
-                checks_without_improvement += 1
-            if (args.early_stopping_patience > 0 and checks_without_improvement >= args.early_stopping_patience):
-                stopped_early = True
-                print(
-                    f"Early stopping at epoch {epoch}: {args.checkpoint_metric} " f"did not improve by more than {args.early_stopping_min_delta:g} " f"for {args.early_stopping_patience} checkpoint evaluations.")
-                break
+        checkpoint_score = float(macro)
+        if best_state is None or checkpoint_score > best_score + args.early_stopping_min_delta:
+            best_score = checkpoint_score
+            best_epoch = epoch
+            checks_without_improvement = 0
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+        else:
+            checks_without_improvement += 1
+        if args.early_stopping_patience > 0 and checks_without_improvement >= args.early_stopping_patience:
+            stopped_early = True
+            print(f"Early stopping at epoch {epoch}: validation macro-F1 did not improve by more than {args.early_stopping_min_delta:g} for {args.early_stopping_patience} epochs.")
+            break
     if best_state is None:
         raise RuntimeError("Training did not produce a checkpoint.")
     model.load_state_dict(best_state)
@@ -399,8 +371,7 @@ def train_deep_viral_classification(args):
     label_ids = np.arange(len(full.label_encoder.classes_))
     report = classification_report(y_true, y_pred, labels=label_ids, target_names=(full.label_encoder.classes_), output_dict=True, zero_division=0, )
     best_row = next(row for row in history if row["epoch"] == best_epoch)
-    metrics = {"dataset": args.dataset, "label_column": args.label_column, "model_mode": args.model_mode, "protocol": args.protocol, "fragment_counts": fragment_counts, "class_weighted_loss": bool(args.class_weighted_loss), "gradient_clip_norm": float(args.gradient_clip_norm), "optimizer": args.optimizer, "pcnn_direction": args.pcnn_direction, "seed": int(args.model_seed), "model_seed": int(args.model_seed), "split_seed": int(args.split_seed), "early_stopping_patience": int(args.early_stopping_patience), "early_stopping_min_delta": float(args.early_stopping_min_delta), "stopped_early": bool(stopped_early), "epochs_completed": int(len(history)), "min_class_count": int(args.min_class_count), "n_retained": int(len(full)), "n_classes_retained": int(len(full.label_encoder.classes_)), "class_counts_before": (full.class_counts_before), "class_counts_after": (full.class_counts_after), "skipped_count": int(len(full.skipped)), "skipped_examples": (full.skipped[:10]), "classes": (full.label_encoder .classes_ .tolist()), "n_train": int(len(train)), "n_val": int(len(val)), "n_test": int(len(test)), "best_epoch": int(best_epoch), "checkpoint_metric": args.checkpoint_metric, "checkpoint_metric_score": float(
-        best_score), "checkpoint_knn_metric": (args.checkpoint_knn_metric if args.checkpoint_metric == "val_1nn_accuracy" else None), "checkpoint_eval_interval": int(args.checkpoint_eval_interval), "checkpoint_distance_jobs": int(args.checkpoint_distance_jobs), "best_val_macro_f1": float(best_row["val_macro_f1"]), "best_val_1nn_accuracy": best_row["val_1nn_accuracy"], "accuracy": float(accuracy_score(y_true, y_pred, )), "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred, )), "macro_f1": float(f1_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )), "macro_recall": float(recall_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )), "macro_precision": float(precision_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )), "weighted_f1": float(f1_score(y_true, y_pred, labels=label_ids, average="weighted", zero_division=0, )), "weighted_recall": float(recall_score(y_true, y_pred, labels=label_ids, average="weighted", zero_division=0, )), "weighted_precision": float(precision_score(y_true, y_pred, labels=label_ids, average="weighted", zero_division=0, )), "history": history, "classification_report": report, }
+    metrics = {"dataset": args.dataset, "label_column": args.label_column, "model_mode": args.model_mode, "fragment_counts": fragment_counts, "class_weighted_loss": bool(args.class_weighted_loss), "gradient_clip_norm": float(args.gradient_clip_norm), "optimizer": args.optimizer, "pcnn_direction": args.pcnn_direction, "seed": int(args.model_seed), "model_seed": int(args.model_seed), "split_seed": int(args.split_seed), "early_stopping_patience": int(args.early_stopping_patience), "early_stopping_min_delta": float(args.early_stopping_min_delta), "stopped_early": bool(stopped_early), "epochs_completed": int(len(history)), "min_class_count": int(args.min_class_count), "n_retained": int(len(full)), "n_classes_retained": int(len(full.label_encoder.classes_)), "class_counts_before": (full.class_counts_before), "class_counts_after": (full.class_counts_after), "skipped_count": int(len(full.skipped)), "skipped_examples": (full.skipped[:10]), "classes": (full.label_encoder .classes_ .tolist()), "n_train": int(len(train)), "n_val": int(len(val)), "n_test": int(len(test)), "best_epoch": int(best_epoch), "checkpoint_metric": "val_macro_f1", "checkpoint_metric_score": float(best_score), "best_val_macro_f1": float(best_row["val_macro_f1"]), "accuracy": float(accuracy_score(y_true, y_pred, )), "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred, )), "macro_f1": float(f1_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )), "macro_recall": float(recall_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )), "macro_precision": float(precision_score(y_true, y_pred, labels=label_ids, average="macro", zero_division=0, )), "weighted_f1": float(f1_score(y_true, y_pred, labels=label_ids, average="weighted", zero_division=0, )), "weighted_recall": float(recall_score(y_true, y_pred, labels=label_ids, average="weighted", zero_division=0, )), "weighted_precision": float(precision_score(y_true, y_pred, labels=label_ids, average="weighted", zero_division=0, )), "history": history, "classification_report": report, }
     output_dir = (Path(args.output_dir) / args.dataset)
     output_dir.mkdir(parents=True, exist_ok=True, )
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -441,50 +412,49 @@ def train_deep_viral_classification(args):
 
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="Train the EXP3_C multiscale path-complex classifier.")
+    parser = argparse.ArgumentParser(
+        description="Train the FPCN viral-family classifier."
+    )
     parser.add_argument("--dataset", required=True)
-    parser.set_defaults(data_dir="./src/data")
     parser.add_argument("--feature-root", required=True)
     parser.add_argument("--output-dir", default="./results/deep_viral_classification")
     parser.add_argument("--checkpoint-dir", default="./checkpoints")
-    parser.add_argument("--label-column", default="Family")
-    parser.add_argument("--accession-column", default=None)
-    parser.add_argument("--protocol", choices=["1nn", "5nn"], default="1nn", help="CAKR comparison protocol: 1nn uses minimum class count 3; 5nn uses 15.", )
-    parser.add_argument("--min-class-count", type=int, default=None, help="Override the protocol-specific minimum family count.", )
+    parser.add_argument("--min-class-count", type=int, default=3)
     parser.add_argument("--model-seed", type=int, default=42)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=80)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-3)
-    parser.add_argument("--hidden-dim", type=int, default=512)
-    parser.add_argument("--pcnn-layers", type=int, default=3)
-    parser.add_argument("--pcnn-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--pcnn-direction", choices=["bidirectional", "upward"], default="bidirectional", )
-    parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adamw")
-    parser.add_argument("--scheduler", choices=["none", "onecycle"], default="onecycle")
-    parser.add_argument("--onecycle-pct-start", type=float, default=0.3)
-    parser.add_argument("--onecycle-div-factor", type=float, default=25.0)
-    parser.add_argument("--onecycle-final-div-factor", type=float, default=10000.0)
-    parser.add_argument("--class-weighted-loss", action="store_true")
-    parser.add_argument("--gradient-clip-norm", type=float, default=0.0)
-    parser.add_argument("--checkpoint-metric", choices=["val_macro_f1", "val_1nn_accuracy"], default="val_macro_f1", )
-    parser.add_argument("--checkpoint-knn-metric", choices=["cosine", "euclidean", "manhattan"], default="cosine", )
-    parser.add_argument("--checkpoint-eval-interval", type=int, default=5)
-    parser.add_argument("--checkpoint-distance-jobs", type=int, default=1)
-    parser.add_argument("--early-stopping-patience", type=int, default=0)
-    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
-    parser.add_argument("--test-size", type=float, default=0.15)
-    parser.add_argument("--val-size", type=float, default=0.15)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--prefetch-factor", type=int, default=2)
-    parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=True, )
-    parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True, )
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--export-embeddings", action=argparse.BooleanOptionalAction, default=True, )
-    return parser
 
+    parser.set_defaults(
+        data_dir="./src/data",
+        label_column="Family",
+        accession_column=None,
+        epochs=80,
+        lr=2e-4,
+        weight_decay=1e-3,
+        hidden_dim=512,
+        pcnn_layers=3,
+        pcnn_heads=4,
+        dropout=0.2,
+        pcnn_direction="bidirectional",
+        optimizer="adamw",
+        scheduler="onecycle",
+        onecycle_pct_start=0.3,
+        onecycle_div_factor=25.0,
+        onecycle_final_div_factor=10000.0,
+        class_weighted_loss=False,
+        gradient_clip_norm=0.0,
+        early_stopping_patience=0,
+        early_stopping_min_delta=0.0,
+        test_size=0.15,
+        val_size=0.15,
+        prefetch_factor=2,
+        persistent_workers=True,
+        pin_memory=True,
+        export_embeddings=True,
+    )
+    return parser
 
 def main():
     args = build_arg_parser().parse_args()
