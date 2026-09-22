@@ -21,8 +21,6 @@ FPCN/
 
 ## Requirements
 
-FPCN requires Python, PyTorch, NumPy, h5py, scikit-learn and MultiMolecule. Feature preparation downloads the frozen `multimolecule/dnabert2` model from the Hugging Face Hub. A CUDA-capable GPU is recommended for feature generation and training.
-
 Install the core Python dependencies in your environment:
 
 ```bash
