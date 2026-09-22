@@ -1,6 +1,6 @@
 # Fragment Path Complex Networks (FPCN)
 
-FPCN is a multiscale framework for viral family classification. It divides each viral genome into ordered fragments at several scales, encodes local sequence context with DNABERT-2 and represents relationships among individual fragments, adjacent pairs and consecutive triples as a path complex. A shared path complex neural network learns from these ordered relationships, and a learned fusion combines information across fragment scales.
+FPCN is a multiscale framework for viral family classification. 
 
 ## Repository structure
 
@@ -46,7 +46,7 @@ Generate the four-scale features used by FPCN with:
 ```bash
 python -u prepare.py \
   --dataset NCBI_record_valid_nucleotide \
-  --output-dir ./features_EXP3_C_2024_multi_15_17_21_23 \
+  --output-dir ./features_2024_multi_15_17_21_23 \
   --multiscale-fixed-fragment-counts "15,17,21,23" \
   --batch-size 4 \
   --device cuda
@@ -55,7 +55,7 @@ python -u prepare.py \
 Fragment counts must be comma-separated. Feature files are written to:
 
 ```text
-features_EXP3_C_2024_multi_15_17_21_23/NCBI_record_valid_nucleotide/
+features_2024_multi_15_17_21_23/NCBI_record_valid_nucleotide/
 ```
 
 For array-based preparation, `START_IDX` and `END_IDX` can be used to process a subset of genomes:
@@ -63,7 +63,7 @@ For array-based preparation, `START_IDX` and `END_IDX` can be used to process a 
 ```bash
 START_IDX=0 END_IDX=50 python -u prepare.py \
   --dataset NCBI_record_valid_nucleotide \
-  --output-dir ./features_EXP3_C_2024_multi_15_17_21_23 \
+  --output-dir ./features_2024_multi_15_17_21_23 \
   --multiscale-fixed-fragment-counts "15,17,21,23" \
   --batch-size 4 \
   --device cuda
@@ -76,7 +76,7 @@ Train FPCN on one benchmark dataset with:
 ```bash
 python -u main.py deep_viral_classification \
   --dataset NCBI_record_valid_nucleotide \
-  --feature-root ./features_EXP3_C_2024_multi_15_17_21_23 \
+  --feature-root ./features_2024_multi_15_17_21_23 \
   --output-dir ./results/deep_viral_classification \
   --checkpoint-dir ./checkpoints \
   --model-seed 42 \
